@@ -30,10 +30,11 @@ import android.graphics.Bitmap;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
-import android.provider.Settings;
+import android.os.AsyncTask;
 import android.os.UserHandle;
 import android.provider.CallLog;
 import android.provider.CallLog.Calls;
+import android.provider.Settings;
 import android.telecom.CallState;
 import android.telecom.DisconnectCause;
 import android.telecom.PhoneAccount;
@@ -47,7 +48,6 @@ import android.text.TextUtils;
 /**
  * Creates a notification for calls that the user missed (neither answered nor rejected).
  * TODO: Make TelephonyManager.clearMissedCalls call into this class.
- * STOPSHIP: Resolve b/13769374 about moving this class to InCall.
  */
 class MissedCallNotifier extends CallsManagerListenerBase {
 
@@ -98,18 +98,22 @@ class MissedCallNotifier extends CallsManagerListenerBase {
 
     /** Clears missed call notification and marks the call log's missed calls as read. */
     void clearMissedCalls() {
-        // Clear the list of new missed calls from the call log.
-        ContentValues values = new ContentValues();
-        values.put(Calls.NEW, 0);
-        values.put(Calls.IS_READ, 1);
-        StringBuilder where = new StringBuilder();
-        where.append(Calls.NEW);
-        where.append(" = 1 AND ");
-        where.append(Calls.TYPE);
-        where.append(" = ?");
-        mContext.getContentResolver().update(Calls.CONTENT_URI, values, where.toString(),
-                new String[]{ Integer.toString(Calls.MISSED_TYPE) });
-
+        AsyncTask.execute(new Runnable() {
+            @Override
+            public void run() {
+                // Clear the list of new missed calls from the call log.
+                ContentValues values = new ContentValues();
+                values.put(Calls.NEW, 0);
+                values.put(Calls.IS_READ, 1);
+                StringBuilder where = new StringBuilder();
+                where.append(Calls.NEW);
+                where.append(" = 1 AND ");
+                where.append(Calls.TYPE);
+                where.append(" = ?");
+                mContext.getContentResolver().update(Calls.CONTENT_URI, values, where.toString(),
+                        new String[]{ Integer.toString(Calls.MISSED_TYPE) });
+            }
+        });
         cancelMissedCallNotification();
     }
 
@@ -317,13 +321,12 @@ class MissedCallNotifier extends CallsManagerListenerBase {
                     try {
                         while (cursor.moveToNext()) {
                             // Get data about the missed call from the cursor
-                            final String handleString = cursor.getString(
-                                    cursor.getColumnIndexOrThrow(Calls.NUMBER));
-                            Uri handle = Uri.parse(cursor.getString(CALL_LOG_COLUMN_NUMBER));
-                            long date = cursor.getLong(CALL_LOG_COLUMN_DATE);
-                            int presentation = cursor.getInt(cursor.getColumnIndexOrThrow(
-                                    Calls.NUMBER_PRESENTATION));
+                            final String handleString = cursor.getString(CALL_LOG_COLUMN_NUMBER);
+                            final int presentation =
+                                    cursor.getInt(CALL_LOG_COLUMN_NUMBER_PRESENTATION);
+                            final long date = cursor.getLong(CALL_LOG_COLUMN_DATE);
 
+                            final Uri handle;
                             if (presentation != Calls.PRESENTATION_ALLOWED
                                     || TextUtils.isEmpty(handleString)) {
                                 handle = null;

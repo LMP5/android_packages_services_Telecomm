@@ -28,17 +28,21 @@ import android.content.IntentFilter;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.Message;
 import android.os.RemoteException;
 import android.telecom.CallState;
+import android.telecom.Connection;
 import android.telecom.PhoneAccount;
-import android.telecom.PhoneCapabilities;
+import android.telecom.PhoneAccountHandle;
 import android.telephony.PhoneNumberUtils;
+import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 
 import com.android.server.telecom.CallsManager.CallsManagerListener;
 
+import java.lang.NumberFormatException;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -53,7 +57,8 @@ public final class BluetoothPhoneService extends Service {
      * Request object for performing synchronous requests to the main thread.
      */
     private static class MainThreadRequest {
-        Object result;
+        private static final Object RESULT_NOT_SET = new Object();
+        Object result = RESULT_NOT_SET;
         int param;
 
         MainThreadRequest(int param) {
@@ -291,7 +296,20 @@ public final class BluetoothPhoneService extends Service {
                     try {
                         PhoneAccount account = getBestPhoneAccount();
                         if (account != null) {
-                            label = account.getLabel().toString();
+                            PhoneAccountHandle ph = account.getAccountHandle();
+                            if (ph != null) {
+                                String subId = ph.getId();
+                                int sub = SubscriptionManager.getDefaultVoiceSubId();
+                                try {
+                                    sub = Integer.parseInt(subId);
+                                } catch (NumberFormatException e){
+                                    Log.w(this, " NumberFormatException " + e);
+                                }
+                                label = TelephonyManager.from(BluetoothPhoneService.this)
+                                         .getNetworkOperatorName(sub);
+                            } else {
+                                Log.w(this, "Phone Account Handle is NULL");
+                            }
                         } else {
                             // Finally, just get the network name from telephony.
                             label = TelephonyManager.from(BluetoothPhoneService.this)
@@ -510,7 +528,7 @@ public final class BluetoothPhoneService extends Service {
                 return true;
             }
         } else if (chld == CHLD_TYPE_HOLDACTIVE_ACCEPTHELD) {
-            if (activeCall != null && activeCall.can(PhoneCapabilities.SWAP_CONFERENCE)) {
+            if (activeCall != null && activeCall.can(Connection.CAPABILITY_SWAP_CONFERENCE)) {
                 activeCall.swapConference();
                 Log.i(TAG, "CDMA calls in conference swapped, updating headset");
                 updateHeadsetWithCallState(true /* force */);
@@ -523,13 +541,13 @@ public final class BluetoothPhoneService extends Service {
                 // currently-held call.
                 callsManager.unholdCall(heldCall);
                 return true;
-            } else if (activeCall != null && activeCall.can(PhoneCapabilities.HOLD)) {
+            } else if (activeCall != null && activeCall.can(Connection.CAPABILITY_HOLD)) {
                 callsManager.holdCall(activeCall);
                 return true;
             }
         } else if (chld == CHLD_TYPE_ADDHELDTOCONF) {
             if (activeCall != null) {
-                if (activeCall.can(PhoneCapabilities.MERGE_CONFERENCE)) {
+                if (activeCall.can(Connection.CAPABILITY_MERGE_CONFERENCE)) {
                     activeCall.mergeConference();
                     return true;
                 } else {
@@ -553,14 +571,19 @@ public final class BluetoothPhoneService extends Service {
     }
 
     private <T> T sendSynchronousRequest(int message, int param) {
+        if (Looper.myLooper() == mHandler.getLooper()) {
+            Log.w(TAG, "This method will deadlock if called from the main thread.");
+        }
+
         MainThreadRequest request = new MainThreadRequest(param);
         mHandler.obtainMessage(message, request).sendToTarget();
         synchronized (request) {
-            while (request.result == null) {
+            while (request.result == MainThreadRequest.RESULT_NOT_SET) {
                 try {
                     request.wait();
                 } catch (InterruptedException e) {
                     // Do nothing, go back and wait until the request is complete.
+                    Log.e(TAG, e, "InterruptedException");
                 }
             }
         }
@@ -601,8 +624,8 @@ public final class BluetoothPhoneService extends Service {
 
             // Run some alternative states for Conference-level merge/swap support.
             // Basically, if call supports swapping or merging at the conference-level, then we need
-            // to expose the calls as having distinct states (ACTIVE vs HOLD) or the functionality
-            // won't show up on the bluetooth device.
+            // to expose the calls as having distinct states (ACTIVE vs CAPABILITY_HOLD) or the
+            // functionality won't show up on the bluetooth device.
 
             // Before doing any special logic, ensure that we are dealing with an ACTIVE call and
             // that the conference itself has a notion of the current "active" child call.
@@ -611,8 +634,8 @@ public final class BluetoothPhoneService extends Service {
                 // Reevaluate state if we can MERGE or if we can SWAP without previously having
                 // MERGED.
                 boolean shouldReevaluateState =
-                        conferenceCall.can(PhoneCapabilities.MERGE_CONFERENCE) ||
-                        (conferenceCall.can(PhoneCapabilities.SWAP_CONFERENCE) &&
+                        conferenceCall.can(Connection.CAPABILITY_MERGE_CONFERENCE) ||
+                        (conferenceCall.can(Connection.CAPABILITY_SWAP_CONFERENCE) &&
                          !conferenceCall.wasConferencePreviouslyMerged());
 
                 if (shouldReevaluateState) {
@@ -694,7 +717,7 @@ public final class BluetoothPhoneService extends Service {
 
         String ringingAddress = null;
         int ringingAddressType = 128;
-        if (ringingCall != null) {
+        if (ringingCall != null && ringingCall.getHandle() != null) {
             ringingAddress = ringingCall.getHandle().getSchemeSpecificPart();
             if (ringingAddress != null) {
                 ringingAddressType = PhoneNumberUtils.toaFromString(ringingAddress);
@@ -707,16 +730,17 @@ public final class BluetoothPhoneService extends Service {
         int numActiveCalls = activeCall == null ? 0 : 1;
         int numHeldCalls = callsManager.getNumHeldCalls();
         boolean callsSwitched = (numHeldCalls == 2);
+
         // For conference calls which support swapping the active call within the conference
         // (namely CDMA calls) we need to expose that as a held call in order for the BT device
         // to show "swap" and "merge" functionality.
         boolean ignoreHeldCallChange = false;
         if (activeCall != null && activeCall.isConference()) {
-            if (activeCall.can(PhoneCapabilities.SWAP_CONFERENCE)) {
+            if (activeCall.can(Connection.CAPABILITY_SWAP_CONFERENCE)) {
                 // Indicate that BT device should show SWAP command by indicating that there is a
                 // call on hold, but only if the conference wasn't previously merged.
                 numHeldCalls = activeCall.wasConferencePreviouslyMerged() ? 0 : 1;
-            } else if (activeCall.can(PhoneCapabilities.MERGE_CONFERENCE)) {
+            } else if (activeCall.can(Connection.CAPABILITY_MERGE_CONFERENCE)) {
                 numHeldCalls = 1;  // Merge is available, so expose via numHeldCalls.
             }
 
@@ -865,8 +889,11 @@ public final class BluetoothPhoneService extends Service {
      * phone account for PhoneAccount.SCHEME_TEL.
      */
     private PhoneAccount getBestPhoneAccount() {
-        TelecomApp app = (TelecomApp) getApplication();
-        PhoneAccountRegistrar registry = app.getPhoneAccountRegistrar();
+        PhoneAccountRegistrar registry = TelecomGlobals.getInstance().getPhoneAccountRegistrar();
+        if (registry == null) {
+            return null;
+        }
+
         Call call = getCallsManager().getForegroundCall();
 
         PhoneAccount account = null;

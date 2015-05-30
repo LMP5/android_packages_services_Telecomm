@@ -25,6 +25,7 @@ import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.RemoteException;
+import android.os.Trace;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.Settings;
@@ -91,8 +92,6 @@ public class CallActivity extends Activity {
                 Intent.ACTION_CALL_PRIVILEGED.equals(action) ||
                 Intent.ACTION_CALL_EMERGENCY.equals(action)) {
             processOutgoingCallIntent(intent);
-        } else if (TelecomManager.ACTION_INCOMING_CALL.equals(action)) {
-            processIncomingCallIntent(intent);
         }
     }
 
@@ -134,6 +133,14 @@ public class CallActivity extends Activity {
                 VideoProfile.VideoState.AUDIO_ONLY);
         Log.d(this, "processOutgoingCallIntent videoState = " + videoState);
 
+        if (VideoProfile.VideoState.isVideo(videoState)
+                && TelephonyUtil.shouldProcessAsEmergency(this, handle)) {
+            Log.d(this, "Emergency call...Converting video call to voice...");
+            videoState = VideoProfile.VideoState.AUDIO_ONLY;
+            intent.putExtra(TelecomManager.EXTRA_START_CALL_WITH_VIDEO_STATE,
+                    videoState);
+        }
+
         if (VideoProfile.VideoState.isVideo(videoState) && isTtyModeEnabled()) {
             Toast.makeText(this, getResources().getString(R.string.
                     video_call_not_allowed_if_tty_enabled), Toast.LENGTH_SHORT).show();
@@ -162,11 +169,7 @@ public class CallActivity extends Activity {
 
         intent.putExtra(CallReceiver.KEY_IS_DEFAULT_DIALER, isDefaultDialer());
 
-        if (UserHandle.myUserId() == UserHandle.USER_OWNER) {
-            CallReceiver.processOutgoingCallIntent(getApplicationContext(), intent);
-        } else {
-            sendBroadcastToReceiver(intent, false /* isIncoming */);
-        }
+        sendBroadcastToReceiver(intent, false /* isIncoming */);
     }
 
     private boolean isTtyModeEnabled() {
@@ -177,11 +180,7 @@ public class CallActivity extends Activity {
     }
 
     private void processIncomingCallIntent(Intent intent) {
-        if (UserHandle.myUserId() == UserHandle.USER_OWNER) {
-            CallReceiver.processIncomingCallIntent(intent);
-        } else {
-            sendBroadcastToReceiver(intent, true /* isIncoming */);
-        }
+        sendBroadcastToReceiver(intent, true /* isIncoming */);
     }
 
     private boolean isDefaultDialer() {
@@ -210,11 +209,11 @@ public class CallActivity extends Activity {
     /**
      * Trampolines the intent to the broadcast receiver that runs only as the primary user.
      */
-    private boolean sendBroadcastToReceiver(Intent intent, boolean incoming) {
-        intent.putExtra(CallReceiver.KEY_IS_INCOMING_CALL, incoming);
+    private boolean sendBroadcastToReceiver(Intent intent, boolean isIncoming) {
+        intent.putExtra(CallReceiver.KEY_IS_INCOMING_CALL, isIncoming);
         intent.setFlags(Intent.FLAG_RECEIVER_FOREGROUND);
         intent.setClass(this, CallReceiver.class);
-        Log.d(this, "Sending broadcast as user to CallReceiver- isIncoming: %s", incoming);
+        Log.d(this, "Sending broadcast as user to CallReceiver");
         sendBroadcastAsUser(intent, UserHandle.OWNER);
         return true;
     }

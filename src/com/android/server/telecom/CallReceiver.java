@@ -5,12 +5,15 @@ import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Trace;
 import android.os.UserHandle;
 import android.telecom.PhoneAccount;
 import android.telecom.PhoneAccountHandle;
 import android.telecom.TelecomManager;
+import android.telecom.VideoProfile;
 import android.telephony.DisconnectCause;
 import android.telephony.PhoneNumberUtils;
+import android.widget.Toast;
 
 import com.android.internal.telephony.TelephonyProperties;
 
@@ -31,17 +34,15 @@ public class CallReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
         final boolean isUnknownCall = intent.getBooleanExtra(KEY_IS_UNKNOWN_CALL, false);
-        final boolean isIncomingCall = intent.getBooleanExtra(KEY_IS_INCOMING_CALL, false);
-        Log.i(this, "onReceive - isIncomingCall: %s isUnknownCall: %s", isIncomingCall,
-                isUnknownCall);
+        Log.i(this, "onReceive - isUnknownCall: %s", isUnknownCall);
 
+        Trace.beginSection("processNewCallCallIntent");
         if (isUnknownCall) {
             processUnknownCallIntent(intent);
-        } else if (isIncomingCall) {
-            processIncomingCallIntent(intent);
         } else {
             processOutgoingCallIntent(context, intent);
         }
+        Trace.endSection();
     }
 
     /**
@@ -50,6 +51,10 @@ public class CallReceiver extends BroadcastReceiver {
      * @param intent Call intent containing data about the handle to call.
      */
     static void processOutgoingCallIntent(Context context, Intent intent) {
+        if (shouldPreventDuplicateVideoCall(context, intent)) {
+            return;
+        }
+
         Uri handle = intent.getData();
         String scheme = handle.getScheme();
         String uriString = handle.getSchemeSpecificPart();
@@ -91,7 +96,7 @@ public class CallReceiver extends BroadcastReceiver {
                     isSkipSchemaParsing);
         }
         if (clientExtras == null) {
-            clientExtras = Bundle.EMPTY;
+            clientExtras = new Bundle();
         }
 
         final boolean isDefaultDialer = intent.getBooleanExtra(KEY_IS_DEFAULT_DIALER, false);
@@ -134,7 +139,7 @@ public class CallReceiver extends BroadcastReceiver {
             clientExtras = intent.getBundleExtra(TelecomManager.EXTRA_INCOMING_CALL_EXTRAS);
         }
         if (clientExtras == null) {
-            clientExtras = Bundle.EMPTY;
+            clientExtras = new Bundle();
         }
 
         Log.d(TAG, "Processing incoming call from connection service [%s]",
@@ -178,5 +183,29 @@ public class CallReceiver extends BroadcastReceiver {
         }
         errorIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         context.startActivityAsUser(errorIntent, UserHandle.CURRENT);
+    }
+
+    /**
+     * Whether an outgoing video call should be prevented from going out. Namely, don't allow an
+     * outgoing video call if there is already an ongoing video call. Notify the user if their call
+     * is not sent.
+     *
+     * @return {@code true} if the outgoing call is a video call and should be prevented from going
+     *     out, {@code false} otherwise.
+     */
+    private static boolean shouldPreventDuplicateVideoCall(Context context, Intent intent) {
+        int intentVideoState = intent.getIntExtra(TelecomManager.EXTRA_START_CALL_WITH_VIDEO_STATE,
+                VideoProfile.VideoState.AUDIO_ONLY);
+        if (intentVideoState == VideoProfile.VideoState.AUDIO_ONLY
+                || !getCallsManager().hasVideoCall()) {
+            return false;
+        } else {
+            // Display an error toast to the user.
+            Toast.makeText(
+                    context,
+                    context.getResources().getString(R.string.duplicate_video_call_not_allowed),
+                    Toast.LENGTH_LONG).show();
+            return true;
+        }
     }
 }
